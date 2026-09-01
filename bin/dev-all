@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Starts all DocChat dev processes (API, Sidekiq worker, frontend) together.
+# Loads .env explicitly so it works even with an interactive dotenv shell plugin.
+#
+# Usage:  ./bin/dev-all
+# Stop:   Ctrl-C (all child processes are terminated together)
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+if [ ! -f .env ]; then
+  echo "ERROR: .env not found. Copy .env.example to .env and set GEMINI_API_KEY." >&2
+  exit 1
+fi
+
+# Load .env into this script's environment (ignores comments/blank lines).
+set -a
+# shellcheck disable=SC1091
+source <(grep -vE '^\s*#|^\s*$' .env)
+set +a
+
+if [ -z "${GEMINI_API_KEY:-}" ] && [ -z "${OPENAI_API_KEY:-}" ]; then
+  echo "ERROR: no API key set in .env (need GEMINI_API_KEY or OPENAI_API_KEY)." >&2
+  exit 1
+fi
+
+# Ensure Redis is reachable (required by Sidekiq).
+if ! redis-cli ping >/dev/null 2>&1; then
+  echo "ERROR: Redis is not running. Start it with: brew services start redis" >&2
+  exit 1
+fi
+
+# Install frontend deps on first run.
+if [ ! -d frontend/node_modules ]; then
+  echo "Installing frontend dependencies..."
+  npm --prefix frontend install
+fi
+
+echo "Starting DocChat:"
+echo "  API      -> http://localhost:3000"
+echo "  Frontend -> http://localhost:5173"
+echo "  Sidekiq  -> http://localhost:3000/sidekiq"
+echo "Press Ctrl-C to stop everything."
+echo
+
+pids=()
+cleanup() {
+  echo
+  echo "Shutting down..."
+  for pid in "${pids[@]}"; do
+    kill "$pid" 2>/dev/null || true
+  done
+  wait 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+bin/rails server -p 3000 &
+pids+=($!)
+
+bundle exec sidekiq -c 5 &
+pids+=($!)
+
+npm --prefix frontend run dev &
+pids+=($!)
+
+wait
